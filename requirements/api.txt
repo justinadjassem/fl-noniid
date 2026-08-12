@@ -1,0 +1,19 @@
+# Dépendances de api/ — l'API qui orchestre et sert le modèle.
+#
+# Hérite de core.txt : l'API lance les entraînements dans son processus,
+# elle a donc besoin de tout le cœur scientifique.
+#
+# ATTENTION — ces versions ne sont pas libres. Flower 1.33 embarque ses
+# propres composants serveur et contraint tout le stack web :
+#
+#     fastapi>=0.138.0,<0.139.0
+#     uvicorn[standard]>=0.49.0,<0.50.0
+#     starlette>=1.3.1,<1.4.0
+#
+# Ne pas montez FastAPI sans vérifier ce que la version de Flower autorise :
+#     python -c "from importlib.metadata import requires; print(requires('flwr'))"
+
+-r core.txt
+
+fastapi==0.138.2
+uvicorn[standard]==0.49.0

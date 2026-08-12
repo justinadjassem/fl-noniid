@@ -1,0 +1,12 @@
+# Environnement de développement local : tout, plus l'outillage.
+#
+#   python -m venv .venv
+#   .venv/Scripts/activate
+#   pip install -r requirements/dev.txt
+
+-r api.txt
+-r app.txt
+
+pytest>=8.0
+matplotlib>=3.9        # heatmaps de partition, figures du rapport
+httpx>=0.27            # TestClient de FastAPI

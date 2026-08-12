@@ -1,0 +1,26 @@
+# Dépendances de fl_core/ le cœur scientifique.
+#
+# C'est aussi ce que Colab installe : run_grid.py n'a besoin de rien d'autre
+# (ni FastAPI, ni Streamlit).
+#
+# Note Docker : sur Linux, `pip install torch` tire par défaut la build CUDA
+# (~2,5 Go). Le Dockerfile installe d'abord la build CPU depuis l'index
+# dédié. Ce fichier reste neutre en plateforme pour que le venv Windows
+# fonctionne aussi.
+
+-r contracts.txt
+
+numpy>=1.26
+torch==2.10.0
+torchvision==0.25.0
+
+# Apprentissage fédéré. Version épinglée : l'API a beaucoup changé entre
+# 1.0 et 1.33, les tutoriels en ligne ne correspondent pas.
+# L'extra [simulation] tire Ray, fragile sous Windows -> préférer Docker.
+flwr[simulation]==1.33.0
+
+# Suivi d'expériences
+mlflow==3.15.1
+
+# Lecture de experiments/grid.yaml
+PyYAML>=6.0

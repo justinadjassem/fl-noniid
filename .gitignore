@@ -1,20 +1,49 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
 .venv/
 venv/
-.env
+env/
+ENV/
+.conda/
 
-# Données brutes : retéléchargées par torchvision
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Secret / local config
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Project data
+# Raw datasets are downloaded/generated locally and should not be tracked.
 data/
 
-# Poids de modèles 
+# Model weights / generated artifacts
 artifacts/*.pt
 
-# Base SQLite de travail : les WAL/SHM sont transitoires.
-# results.db sera commité volontairement une fois la grille finale calculée.
+# SQLite temp files (keep the main DB if needed, but ignore WAL/SHM)
 results/*.db-wal
 results/*.db-shm
-
-.streamlit/secrets.toml
-.pytest_cache/
-.DS_Store
+results/*.db

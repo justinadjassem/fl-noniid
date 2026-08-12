@@ -1,0 +1,19 @@
+# Dépendances de app/ le dashboard Streamlit.
+#
+# Hérite de contracts.txt seulement, jamais de core.txt : le dashboard ne
+# fait qu'appeler l'API en HTTP. Lui donner torch ferait passer son image
+# de ~250 Mo à plus de 2 Go pour du code qu'il n'exécute jamais.
+
+-r contracts.txt
+
+# Streamlit >= 1.61 : les versions 1.4x plafonnent protobuf a <6, ce qui
+# entre en conflit avec flwr (protobuf>=5.28,<7) dès que les deux cohabitent
+# dans requirements/dev.txt. 1.61 demande protobuf<8,>=5.26.1 : compatible.
+streamlit==1.61.1
+plotly==5.24.1
+pandas==2.2.3
+
+# >= 2.33 impose par flwr 1.33. Le dashboard n'utilise pas flwr, mais
+# requirements/dev.txt installe les deux dans le meme venv : garder cette
+# borne evite un conflit de résolution en développement local.
+requests==2.34.2

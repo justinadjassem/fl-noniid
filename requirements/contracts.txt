@@ -1,0 +1,6 @@
+#Dépendances de contracts/ le contrat partagé.
+#minimal, ce module est importé partout (fl_core, api, app).
+#Chaque paquet ajouté ici est imposé aux trois. Ne rien mettre
+#qui ne soit pas strictement nécessaire aux schémas.
+
+pydantic==2.10.4
