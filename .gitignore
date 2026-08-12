@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Données brutes : retéléchargées par torchvision
+data/
+
+# Poids de modèles 
+artifacts/*.pt
+
+# Base SQLite de travail : les WAL/SHM sont transitoires.
+# results.db sera commité volontairement une fois la grille finale calculée.
+results/*.db-wal
+results/*.db-shm
+
+.streamlit/secrets.toml
+.pytest_cache/
+.DS_Store
