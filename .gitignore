@@ -47,3 +47,5 @@ artifacts/*.pt
 results/*.db-wal
 results/*.db-shm
 results/*.db
+
+GIT.md
