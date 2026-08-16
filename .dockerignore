@@ -1,0 +1,14 @@
+.venv/
+venv/
+.git/
+.idea/
+__pycache__/
+*.py[cod]
+
+# 404 Mo, retéléchargés par torchvision dans le conteneur
+data/
+
+mlruns/
+.pytest_cache/
+docs/
+*.md
