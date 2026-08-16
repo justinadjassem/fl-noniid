@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+primaryColor = "#8B2FE8"          # violet — accent d'interface uniquement
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"   # champs et fonds d'expander
+textColor = "#31333F"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

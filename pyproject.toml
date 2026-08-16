@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fl-noniid"
+version = "0.1.0"
+description = "Apprentissage fédéré sur données non-IID — FedAvg vs FedProx"
+requires-python = ">=3.12"
+
+# Volontairement vide : les dépendances vivent dans requirements/, en couches.
+# Les déclarer ici les dupliquerait et ferait diverger les deux sources.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["contracts*", "fl_core*", "api*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
