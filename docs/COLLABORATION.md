@@ -77,6 +77,7 @@ contracts/schemas.py   LE CONTRAT — RunConfig, RoundMetric, Run, GridCell
 fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
   data/loaders.py      chargement MNIST / CIFAR-10
   data/partition.py    partition de Dirichlet
+  data/plot_partition.py  heatmap + manifestes JSON
   models/cnn.py        le CNN (GroupNorm)
   seeding.py           déterminisme
   train.py             train_local() et evaluate() — utilisés par TOUT
@@ -193,7 +194,7 @@ Seul fichier dont dépendent les trois couches.
 | Docker | ✅ | `docker compose up --build`, 2 services |
 | Dépendances en couches | ✅ | `requirements/` + `pyproject.toml` |
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
-| **ML-2** modèle et bornes | ✅ | **99,33 % en centralisé** — point d'arrêt franchi |
+| **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
 
 **31 tests passent.**
 
@@ -946,6 +947,7 @@ Chacun a déjà coûté du temps à quelqu'un.
 | 12 | **`mlflow models serve` recrée un env conda** au démarrage | `--env-manager local` |
 | 13 | **Journaliser depuis les clients Ray** : écritures concurrentes | renvoyer les métriques depuis `fit()`, journaliser côté serveur |
 | 14 | **Comparer sync et async à nombre de rounds égal** : biaise en faveur du synchrone | axe des abscisses = temps écoulé |
+| 15 | **`git add` sur un chemin ignoré ne fait rien, en silence** — une règle `data/` sans barre initiale matche à toute profondeur et a avalé `fl_core/data/` pendant deux commits | `git add <chemin> && git status --short` : si le fichier n'apparaît pas en `A`, il est ignoré. Puis `git check-ignore -v <chemin>` donne la règle coupable |
 
 ---
 
