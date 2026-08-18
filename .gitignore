@@ -38,7 +38,9 @@ ENV/
 
 # Project data
 # Raw datasets are downloaded/generated locally and should not be tracked.
-data/
+/data/
+
+!fl_core/data/
 
 # Model weights / generated artifacts
 artifacts/*.pt
