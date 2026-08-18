@@ -193,7 +193,7 @@ Seul fichier dont dépendent les trois couches.
 | Docker | ✅ | `docker compose up --build`, 2 services |
 | Dépendances en couches | ✅ | `requirements/` + `pyproject.toml` |
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
-| **ML-2** modèle et bornes | 🔄 | `cnn.py` fait, bornes en cours |
+| **ML-2** modèle et bornes | ✅ | **99,33 % en centralisé** — point d'arrêt franchi |
 
 **31 tests passent.**
 
@@ -214,6 +214,43 @@ non-IID, à mentionner au rapport.
 
 Modèle : **356 682 paramètres** (MNIST), **1,43 Mo échangés par client et par
 round**. Ce chiffre alimente `comm_mb`.
+
+Borne haute mesurée — MNIST centralisé, 8 époques, lr 0,01, batch 64 :
+
+| round | 1 | 2 | 3 | 5 | 8 |
+|---|---|---|---|---|---|
+| accuracy | 0,9834 | 0,9890 | 0,9898 | 0,9910 | **0,9933** |
+
+L'accuracy oscille de ±0,2 point d'une époque à l'autre, **en centralisé, dans
+le cas le plus favorable qui soit**. C'est votre bruit de fond de référence :
+un écart de cet ordre entre FedAvg et FedProx ne prouvera rien. Ça justifie
+concrètement `final_acc` sur la moyenne des 5 derniers rounds, et les 3 seeds.
+
+### ⚠️ Le budget de calcul, à trancher en ML-6
+
+**296 s par époque** sur les 60 000 images (2 371 s / 8 époques, CPU).
+
+```
+10 clients × 2 époques locales × 6 000 images = 120 000 images/round
+120 000 / 60 000 × 296 s                      ≈ 590 s par round  (~10 min)
+```
+
+Un run de 100 rounds = 16 h. La grille de 45 runs = plusieurs semaines. **C'est
+intenable en l'état**, et l'ajout du mode asynchrone double le nombre de runs.
+
+Les leviers, à combiner :
+
+| Levier | Gain |
+|---|---|
+| `batch_size` 64 → 128 | ×1,5 |
+| sous-échantillonner MNIST à 20 000 images | ×3 |
+| `participation` 1,0 → 0,5 | ×2 |
+| `rounds` 100 → 60 | ×1,7 |
+| Colab GPU | ×3-5 |
+
+Deux ou trois de ces leviers suffisent à repasser sous la nuit. **La décision
+se prend sur `wall_time_s` mesuré, pas sur une estimation** — c'est pour ça que
+le champ est dans le contrat depuis le premier jour.
 
 ---
 
@@ -540,6 +577,156 @@ git commit -m "results: final ablation grid"
 
 ---
 
+### ML-8 · Monitoring par client
+`ml/monitoring-clients` — *dépend de ML-3*
+
+Jusqu'ici on ne journalise que l'agrégat par round. Il faut descendre au client.
+
+**Le contrat change.** Ajout dans `contracts/schemas.py` :
+
+```python
+class ClientMetric(BaseModel):
+    """Une ligne par client et par round. C'est le grain fin du monitoring."""
+
+    client_id: int
+    n_samples: int              # taille du shard : le déséquilibre de quantité
+    epochs_run: int             # < local_epochs si hétérogénéité systèmes
+    local_acc: float            # sur le jeu de test GLOBAL, comparable
+    local_loss: float
+    drift: float                # ||w_k - w_global||_2  <-- voir ci-dessous
+    wall_time_s: float          # qui ralentit le round
+
+
+class RoundMetric(BaseModel):
+    ...
+    clients: list[ClientMetric] = []     # défaut vide : changement NON cassant
+```
+
+> Le défaut `[]` rend la modification rétrocompatible : le moteur factice, les
+> bornes et le dashboard continuent de fonctionner sans une ligne modifiée.
+> C'est la forme à privilégier pour toute évolution du contrat.
+
+**La métrique qui compte : `drift`**
+
+```python
+drift = torch.sqrt(sum(((p - g) ** 2).sum()
+                       for p, g in zip(local.parameters(), global_params))).item()
+```
+
+C'est **exactement la quantité que le terme proximal de FedProx pénalise**.
+La journaliser par client et par round vous donne bien plus qu'une courbe
+d'accuracy : la preuve directe que FedProx *contient la dérive*, et pas
+seulement qu'il améliore le score. Attendu — à vérifier :
+
+- à α grand, `drift` reste faible et homogène entre clients
+- à α petit, `drift` explose et se disperse
+- **à μ > 0, `drift` doit être visiblement plus faible qu'à μ = 0, à α égal**
+
+Si ce dernier point n'est pas observé, votre terme proximal ne fait pas son
+travail — c'est un test plus fin que la comparaison d'accuracy.
+
+**Où journaliser.** Toujours **côté serveur**. Les clients Flower tournent dans
+des processus Ray séparés : écrire depuis eux produirait des écritures
+concurrentes. Mais `fit()` renvoie un dictionnaire de métriques :
+
+```python
+def fit(self, parameters, config):
+    ...
+    return get_weights(self.model), self.n_samples, {
+        "client_id": self.cid, "local_acc": acc, "local_loss": loss,
+        "epochs_run": epochs, "drift": drift, "wall_time_s": dt,
+    }
+```
+
+Ces dictionnaires remontent au serveur via `fit_metrics_aggregation_fn`, et
+c'est le serveur qui écrit dans MLflow :
+
+```python
+for c in metric.clients:
+    mlflow.log_metrics({
+        f"client_{c.client_id}/local_acc": c.local_acc,
+        f"client_{c.client_id}/drift":     c.drift,
+        f"client_{c.client_id}/epochs":    c.epochs_run,
+    }, step=metric.round)
+```
+
+10 clients × 6 métriques × 100 rounds = 6 000 points par run. MLflow encaisse
+sans difficulté.
+
+> ✅ **Critère de fin :** dans l'UI MLflow, sélectionner un run et voir dix
+> courbes `client_*/drift` superposées. À α=0.05 elles doivent diverger
+> visiblement ; à α=100 rester groupées.
+
+---
+
+### ML-9 · Mode asynchrone et comparaison
+`ml/async-server` — *dépend de ML-3 et ML-8*
+
+**Pourquoi le serveur maison sert enfin à autre chose.** Flower en simulation
+est **synchrone par construction** : la stratégie attend tous les clients
+sélectionnés avant d'agréger. L'asynchrone ne s'y exprime pas naturellement.
+Votre boucle manuelle de ML-3 en devient le support — elle a désormais deux
+raisons d'exister : oracle de validation, et substrat de l'asynchrone.
+
+**`fl_core/async_server.py`** — approche FedAsync (Xie et al. 2019) :
+
+```
+w_global <- (1 - a_t) * w_global + a_t * w_k
+```
+
+où `a_t = alpha_async * s(tau)`, avec `tau = round_courant - round_de_depart_du_client`
+la **staleness** (ancienneté de la mise à jour), et `s` décroissante :
+
+```python
+def staleness_weight(tau: int, kind: str = "polynomial", a: float = 0.5) -> float:
+    """Pondération décroissante avec l'ancienneté de la mise à jour."""
+    if kind == "constant":
+        return 1.0
+    if kind == "polynomial":
+        return (1 + tau) ** (-a)
+    if kind == "hinge":
+        return 1.0 if tau <= 4 else 1.0 / (a * (tau - 4) + 1)
+    raise ValueError(kind)
+```
+
+**Simuler l'asynchronisme sans concurrence réelle.** Pas besoin de threads :
+on donne à chaque client une *durée* de calcul (tirée d'une loi, ou
+proportionnelle à la taille de son shard), on maintient une file d'événements
+triée par date de fin, et on agrège **dès qu'un client termine** au lieu
+d'attendre le round complet. Déterministe, reproductible, et ça capture
+l'essentiel : la staleness.
+
+```
+file = [(date_fin_k, client_k, w_global_au_depart) pour chaque client]
+tant que temps < budget :
+    prendre l'événement le plus proche
+    tau = round_courant - round_de_depart_de_ce_client
+    w_global <- (1 - a_t) * w_global + a_t * w_k     avec a_t = alpha_async * s(tau)
+    replanifier ce client avec une nouvelle durée
+```
+
+**Les runs à produire pour la comparaison :**
+
+| Configuration | Pourquoi |
+|---|---|
+| sync FedAvg, α ∈ {0.1, 0.5} | référence |
+| async FedAvg, α ∈ {0.1, 0.5} | l'effet du protocole |
+| sync FedProx μ=0.01 | référence |
+| async FedProx μ=0.01 | le terme proximal aide-t-il aussi en async ? |
+| les quatre, avec `systems_heterogeneity=True` | le régime où l'async doit gagner |
+
+À comparer **à temps de calcul égal**, pas à nombre de rounds égal — c'est tout
+l'argument de l'asynchrone : plus de mises à jour par unité de temps.
+
+> ✅ **Critère de fin :** une figure accuracy vs *temps écoulé* (pas vs round)
+> montrant sync et async, avec et sans stragglers.
+
+> ⚠️ **Le piège de la comparaison.** Comparer sync et async à nombre de rounds
+> égal est trompeur et biaise en faveur du synchrone. L'axe des abscisses doit
+> être le temps, ou le nombre de mises à jour du modèle global.
+
+---
+
 ### BACK · Les tâches backend
 
 | # | Branche | Contenu | Critère de fin |
@@ -550,6 +737,8 @@ git commit -m "results: final ablation grid"
 | 4 | `api/streaming-sse` | flux SSE, worker séparé | la courbe se dessine round par round |
 | 5 | `api/predict` | `POST /predict` : une image → 4 modèles | le client local se trompe, le global réussit |
 | 6 | `api/docker-final` | vérification sur machine vierge | clone + une commande = ça marche |
+| **7** | `api/model-registry` | packaging MLflow + registry + alias | `models:/fl-noniid-fedavg@champion` résout |
+| **8** | `api/model-serving` | conteneur `mlflow models serve` | `POST /invocations` répond une prédiction |
 
 **MLflow remplace le stockage mémoire, il ne s'y ajoute pas.** Deux sources de
 vérité divergeraient. Ce qui reste à nous : `final_acc` et `rounds_to_target`,
@@ -569,6 +758,99 @@ par pas, et le round de communication en est un.
 Le client local se trompe là où le global réussit — **c'est le client drift
 rendu visible en direct**, et le meilleur moment de la soutenance.
 
+#### BACK-7 · Packaging et Model Registry
+
+Journaliser le modèle avec **signature et exemple d'entrée** — sans eux,
+MLflow ne sait pas valider ce qu'on lui envoie au moment de servir :
+
+```python
+import mlflow, numpy as np
+from mlflow.models import infer_signature
+
+example = np.random.rand(1, 1, 28, 28).astype("float32")
+with torch.no_grad():
+    signature = infer_signature(example, model(torch.tensor(example)).numpy())
+
+mlflow.pytorch.log_model(
+    pytorch_model=model,
+    name="model",
+    signature=signature,
+    input_example=example,
+    registered_model_name=f"fl-noniid-{cfg.algo.value}",
+)
+```
+
+> ⚠️ **Les « stages » du registry (`Staging` / `Production`) sont dépréciés
+> depuis MLflow 2.9** — `transition_model_version_stage` porte un
+> `@deprecated`. Le remplacement officiel, ce sont les **alias**. Même rôle :
+> désigner quelle version est servie, sans coder un numéro en dur.
+
+```python
+from mlflow import MlflowClient
+
+client = MlflowClient()
+client.set_registered_model_alias("fl-noniid-fedavg", "champion", version="3")
+client.set_registered_model_alias("fl-noniid-fedavg", "challenger", version="4")
+
+# à citer au rapport : l'URI de service ne change jamais, seule la cible bouge
+uri = "models:/fl-noniid-fedavg@champion"
+```
+
+Taguer les versions avec les métriques qui ont motivé la promotion :
+
+```python
+client.set_model_version_tag("fl-noniid-fedavg", "3", "final_acc", "0.9412")
+client.set_model_version_tag("fl-noniid-fedavg", "3", "alpha", "0.1")
+```
+
+> ✅ **Critère de fin :** `mlflow.pyfunc.load_model("models:/fl-noniid-fedavg@champion")`
+> charge le modèle et prédit sur une image.
+
+#### BACK-8 · Serving via `mlflow models serve`
+
+Un service par modèle servi. **Réutilisez l'image de l'API** : elle contient
+déjà torch et mlflow, donc le modèle se désérialise. Pas de nouvelle image.
+
+```yaml
+  serve-fedavg:
+    build: {context: ., dockerfile: api/Dockerfile}
+    command: >
+      mlflow models serve
+      --model-uri models:/fl-noniid-fedavg@champion
+      --host 0.0.0.0 --port 5001
+      --env-manager local
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports: ["5001:5001"]
+    volumes: ["./mlruns:/mlflow"]      # les artefacts doivent être lisibles
+    depends_on: [mlflow]
+```
+
+Trois pièges, tous coûteux :
+
+| Piège | Parade |
+|---|---|
+| MLflow recrée un environnement conda par modèle au démarrage | `--env-manager local` : l'image a déjà torch |
+| `models:/…` ne résout pas | `MLFLOW_TRACKING_URI` doit pointer le serveur de suivi |
+| Le serveur démarre mais ne trouve pas les poids | monter le volume des artefacts |
+
+**Appeler l'endpoint :**
+
+```bash
+curl -X POST http://localhost:5001/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": [[[[0.0, 0.1, ...]]]]}'      # forme (1, 1, 28, 28)
+```
+
+> ✅ **Critère de fin :** `POST /invocations` renvoie dix logits pour une image
+> MNIST. À montrer en soutenance — c'est l'endpoint MLflow natif, pas un
+> wrapper maison.
+
+**Ce que devient `/predict`.** L'API FastAPI garde son rôle de démonstration
+comparée : elle appelle les endpoints `/invocations` des quatre services et
+renvoie les quatre verdicts côte à côte. MLflow sert les modèles, FastAPI
+orchestre la comparaison.
+
 ---
 
 ### FRONT · Les tâches frontend
@@ -579,7 +861,17 @@ rendu visible en direct**, et le meilleur moment de la soutenance.
 | 2 | `app/bandes-incertitude` | moyenne ± σ sur les seeds, en aire | plusieurs seeds = une courbe + sa dispersion |
 | 3 | `app/filtres` | filtrer par α, algorithme, dataset | lisible avec 60 runs en base |
 | 4 | `app/tableau-croise` | algo × α, export | copiable tel quel dans le rapport |
-| 5 | `app/demo-predict` | upload image → 4 verdicts | dépend de BACK-5 |
+| 5 | `app/demo-predict` | upload image → 4 verdicts | dépend de BACK-5 et BACK-8 |
+| **6** | `app/vue-par-client` | onglet Clients : une courbe par client | dépend de ML-8 |
+
+**FRONT-6** est l'onglet le plus riche du dashboard. Pour un run donné, dix
+courbes de `drift` et dix d'`local_acc`, plus le nombre d'époques réellement
+effectuées par client et par round (qui révèle les stragglers).
+
+Règle de couleur ici : dix clients dépassent le nombre de teintes catégorielles
+distinguables. **N'inventez pas dix couleurs.** Une seule teinte, opacité
+faible pour l'ensemble, et **mise en évidence du client survolé** — le message
+est la dispersion du faisceau, pas l'identité de chaque courbe.
 
 **FRONT n'attend personne** : le moteur factice produit des données conformes
 au contrat. En attendant la vraie heatmap, générer une matrice 10×10 aléatoire —
@@ -599,6 +891,41 @@ les survivantes.
 
 ---
 
+### Livrable d'analyse · Synchrone vs asynchrone
+
+Section du rapport et des slides, **adossée à vos propres mesures** — c'est ce
+qui la distinguera d'un copier-coller de cours. Les axes :
+
+| | **Synchrone** | **Asynchrone** |
+|---|---|---|
+| **Protocole** | le serveur attend les K clients sélectionnés, puis agrège | le serveur agrège dès qu'un client rend son travail |
+| **Vitesse d'un round** | celle du **plus lent** | indépendante des lents |
+| **Stragglers** | bloquants : un client à 0,25 CPU impose son rythme à tous | absorbés |
+| **Pannes / déconnexions** | round perdu ou client exclu | sans effet, les autres continuent |
+| **Fraîcheur des mises à jour** | toutes calculées depuis le **même** modèle global | **staleness** : un client lent rend une mise à jour calculée depuis un modèle périmé |
+| **Convergence** | garanties théoriques établies (FedAvg, FedProx) | plus fragile, nécessite une pondération par ancienneté |
+| **Reproductibilité** | déterministe à seed égale | dépend de l'ordre d'arrivée — difficile à reproduire exactement |
+| **Débogage** | simple : un round, un état | difficile : l'état global change pendant qu'un client calcule |
+| **Débit** | faible si les clients sont hétérogènes | élevé |
+| **Coût de communication par round** | K × 2 × taille du modèle, prévisible | continu, plus difficile à budgéter |
+
+**L'argument central, à formuler avec vos chiffres :** en synchrone, le round
+coûte le temps du client le plus lent. Avec `systems_heterogeneity`, mesurez
+`max(wall_time_s)` et `mean(wall_time_s)` par round — le rapport des deux **est**
+le coût du protocole synchrone, chiffré sur votre propre expérience.
+
+**Le lien avec FedProx.** Le terme proximal rend les mises à jour *partielles*
+agrégeables sans casser le modèle. C'est une réponse **au sein du protocole
+synchrone** au même problème que l'asynchrone traite en changeant de protocole.
+Les deux approches attaquent l'hétérogénéité systèmes par des voies opposées :
+à discuter, c'est le genre de mise en perspective qui distingue un rapport.
+
+**Ce qui reste vrai dans les deux cas :** l'hétérogénéité des *données* (votre
+α) n'est pas réglée par le choix du protocole. L'asynchrone traite les
+stragglers, pas le client drift.
+
+---
+
 ## 7. Les pièges connus
 
 Chacun a déjà coûté du temps à quelqu'un.
@@ -615,6 +942,10 @@ Chacun a déjà coûté du temps à quelqu'un.
 | 8 | **`ModuleNotFoundError: contracts`** | `pip install -e .` |
 | 9 | **Port 8501 occupé** | un `streamlit run` local tourne encore |
 | 10 | **PowerShell écrit en UTF-16** | jamais de `>` pour créer un fichier texte |
+| 11 | **Stages MLflow dépréciés** depuis 2.9 | utiliser les **alias** (`@champion`) |
+| 12 | **`mlflow models serve` recrée un env conda** au démarrage | `--env-manager local` |
+| 13 | **Journaliser depuis les clients Ray** : écritures concurrentes | renvoyer les métriques depuis `fit()`, journaliser côté serveur |
+| 14 | **Comparer sync et async à nombre de rounds égal** : biaise en faveur du synchrone | axe des abscisses = temps écoulé |
 
 ---
 
@@ -656,9 +987,11 @@ vaut mieux que le maquiller.
 
 | Étape | Le test | Si ça échoue |
 |---|---|---|
-| ML-2 | **~99 % MNIST centralisé** | le modèle est cassé, ne pas écrire de code fédéré |
+| ML-2 | **~99 % MNIST centralisé** ✅ *(99,33 %)* | le modèle est cassé, ne pas écrire de code fédéré |
 | ML-3 | **98-99 % en quasi-IID** | l'agrégation est cassée, pas l'hétérogénéité |
 | ML-4 | **μ=0 ≡ FedAvg exactement** | le terme proximal est faux, résultats à jeter |
+| ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal | le terme proximal ne contient rien |
+| BACK-8 | **`POST /invocations` répond** | le packaging ou le registry est cassé |
 | BACK-6 | clone + une commande | « s'il faut 2 h de configuration, c'est raté » |
 
 Ces tests coûtent quelques minutes chacun et protègent l'intégralité du projet.
