@@ -83,11 +83,14 @@ fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
   train.py             train_local() et evaluate() — utilisés par TOUT
   baselines.py         centralisé et local pur
   runner.py            protocole Runner + moteur factice + get_runner()
+  tracking.py          puits MLflow (écrit par BACK) — inerte sans
+                       MLFLOW_TRACKING_URI
 
+mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
 scripts/               scripts de vérification
-tests/                 31 tests
+tests/                 39 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -195,8 +198,9 @@ Seul fichier dont dépendent les trois couches.
 | Dépendances en couches | ✅ | `requirements/` + `pyproject.toml` |
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
+| **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
 
-**31 tests passent.**
+**39 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -732,7 +736,7 @@ l'argument de l'asynchrone : plus de mises à jour par unité de temps.
 
 | # | Branche | Contenu | Critère de fin |
 |---|---|---|---|
-| 1 | `api/service-mlflow` | `mlflow/Dockerfile`, service compose, `fl_core/tracking.py` | 3 services démarrent, UI MLflow sur `:5000` |
+| 1 ✅ | `api/service-mlflow` | `mlflow/Dockerfile`, service compose, `fl_core/tracking.py` | 3 services démarrent, UI MLflow sur `:5000` |
 | 2 | `api/store-vers-mlflow` | remplacer le stockage mémoire par `search_runs()` | le dashboard marche **sans une ligne modifiée** |
 | 3 | `api/routes-ingestion` | `POST /runs/external`, `/metrics`, `/complete` + jeton | un script extérieur peut verser des métriques |
 | 4 | `api/streaming-sse` | flux SSE, worker séparé | la courbe se dessine round par round |
@@ -943,6 +947,10 @@ Chacun a déjà coûté du temps à quelqu'un.
 | 8 | **`ModuleNotFoundError: contracts`** | `pip install -e .` |
 | 9 | **Port 8501 occupé** | un `streamlit run` local tourne encore |
 | 10 | **PowerShell écrit en UTF-16** | jamais de `>` pour créer un fichier texte |
+| 11 | **MLflow 3.x refuse le magasin de fichiers** (`file://`, l'ancien `./mlruns`) et exige un backend SQLAlchemy | `sqlite:///…` partout, y compris dans les tests |
+| 12 | **Port 5000 déjà occupé** (AirPlay, une autre stack de données) : `docker compose up` échoue | `MLFLOW_PORT=5001 docker compose up` |
+| 13 | **MLflow 3.x rejette l'en-tête `Host`** de l'API (`403 Invalid Host header`) : il ne connaît par défaut que localhost et les IP privées, pas le nom de service `mlflow` | `MLFLOW_SERVER_ALLOWED_HOSTS` dans compose — attention, la variable REMPLACE la liste par défaut |
+| 14 | **`docker-compose` v1 casse avec Docker ≥ 27** (`KeyError: 'ContainerConfig'`) | installer le plugin v2 : `sudo apt install docker-compose-v2` |
 | 11 | **Stages MLflow dépréciés** depuis 2.9 | utiliser les **alias** (`@champion`) |
 | 12 | **`mlflow models serve` recrée un env conda** au démarrage | `--env-manager local` |
 | 13 | **Journaliser depuis les clients Ray** : écritures concurrentes | renvoyer les métriques depuis `fit()`, journaliser côté serveur |

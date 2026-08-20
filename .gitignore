@@ -42,6 +42,12 @@ ENV/
 
 !fl_core/data/
 
+# Suivi d'expériences MLflow.
+# Ignoré pendant tout le développement : le moteur est encore le simulateur,
+# donc ces courbes sont synthétiques. Seule la grille finale sera versionnée,
+# explicitement, par `git add -f mlruns/mlflow.db`.
+mlruns/
+
 # Model weights / generated artifacts
 artifacts/*.pt
 
