@@ -82,6 +82,8 @@ fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
   seeding.py           déterminisme
   train.py             train_local() et evaluate() — utilisés par TOUT
   baselines.py         centralisé et local pur
+  aggregate.py         moyenne pondérée FedAvg
+  server.py            la boucle fédérée — FedAvg ET FedProx
   runner.py            protocole Runner + moteur factice + get_runner()
   tracking.py          puits MLflow (écrit par BACK) — inerte sans
                        MLFLOW_TRACKING_URI
@@ -90,7 +92,7 @@ mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
 scripts/               scripts de vérification
-tests/                 39 tests
+tests/                 52 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -199,8 +201,9 @@ Seul fichier dont dépendent les trois couches.
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
 | **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
+| **ML-3** FedAvg à la main | ✅ | `aggregate.py`, `server.py`, `check_federated.py` · 13 tests · **99,11 % au round 3** en quasi-IID, point d'arrêt franchi |
 
-**39 tests passent.**
+**52 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -257,12 +260,42 @@ Deux ou trois de ces leviers suffisent à repasser sous la nuit. **La décision
 se prend sur `wall_time_s` mesuré, pas sur une estimation** — c'est pour ça que
 le champ est dans le contrat depuis le premier jour.
 
+#### La mesure est tombée (ML-3, 20 août 2026)
+
+**755 s par round**, FedAvg, 2 clients, 2 époques locales, MNIST complet,
+CPU 16 cœurs, machine sous charge 20/16. L'estimation de 590 s était optimiste
+d'environ 28 %.
+
+À 10 clients le travail d'entraînement est **identique** — les mêmes 120 000
+images, réparties autrement — mais s'y ajoutent huit évaluations locales de
+plus par round. Compter **800 à 900 s par round**.
+
+```
+45 runs × 100 rounds × 800 s ≈ 39 jours de CPU
+```
+
+**Décision prise : la grille tournera sur Colab GPU.** `run_federated` résout
+désormais le device automatiquement (`cuda` si disponible), sans quoi le
+passage sur Colab n'apporterait rien — tout y tournerait sur le CPU de la
+machine virtuelle.
+
+Un levier absent du tableau ci-dessus, et le moins cher scientifiquement :
+**n'évaluer les modèles locaux que tous les k rounds**. `std_client_acc` n'a
+pas besoin d'une granularité par round, et cette évaluation représente une
+part importante du coût dès que les clients sont nombreux.
+
 ---
 
 ## 6. Les tâches restantes
 
-### ML-3 · FedAvg à la main
+### ML-3 · FedAvg à la main ✅
 `ml/fedavg-manuel`
+
+> **Fait.** `fl_core/aggregate.py`, `fl_core/server.py`, `scripts/check_federated.py`, 13 tests. Point d'arrêt franchi : **99,11 %
+> au round 3** en quasi-IID (2 clients, α=100), contre 98-99 % attendus en
+> 20-30 rounds. `run_federated` accepte un `device` et résout `cuda`
+> automatiquement. FedProx n'exigera aucune ligne de serveur : `cfg.mu` est
+> déjà transmis à `train_local`, il ne reste que les deux tests de ML-4.
 
 **Pourquoi à la main avant Flower :** vous obtenez une implémentation de
 référence. Au portage sur Flower, vous comparez les chiffres. Sans elle, un
@@ -998,7 +1031,7 @@ vaut mieux que le maquiller.
 | Étape | Le test | Si ça échoue |
 |---|---|---|
 | ML-2 | **~99 % MNIST centralisé** ✅ *(99,33 %)* | le modèle est cassé, ne pas écrire de code fédéré |
-| ML-3 | **98-99 % en quasi-IID** | l'agrégation est cassée, pas l'hétérogénéité |
+| ML-3 | **98-99 % en quasi-IID** ✅ *(99,11 % dès le round 3)* | l'agrégation est cassée, pas l'hétérogénéité |
 | ML-4 | **μ=0 ≡ FedAvg exactement** | le terme proximal est faux, résultats à jeter |
 | ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal | le terme proximal ne contient rien |
 | BACK-8 | **`POST /invocations` répond** | le packaging ou le registry est cassé |
