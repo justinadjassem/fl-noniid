@@ -84,6 +84,7 @@ fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
   baselines.py         centralisé et local pur
   aggregate.py         moyenne pondérée FedAvg
   metrics.py           final_accuracy, rounds_to_target, compare_arms
+  grid.py              plan expérimental : énumération, clés, reprise
   server.py            la boucle fédérée — FedAvg ET FedProx
   runner.py            protocole Runner + moteur factice + get_runner()
   tracking.py          puits MLflow (écrit par BACK) — inerte sans
@@ -92,8 +93,9 @@ fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
 mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
+experiments/           grid.yaml (le protocole) + run_grid.py (la CLI)
 scripts/               scripts de vérification
-tests/                 73 tests
+tests/                 85 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -202,12 +204,13 @@ Seul fichier dont dépendent les trois couches.
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
 | **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
+| **ML-7** outillage de la grille | ✅ | `fl_core/grid.py`, `experiments/grid.yaml`, `run_grid.py` reprenable · 12 tests · **grille non lancée** |
 | **ML-6** métriques et rigueur | ✅ | `fl_core/metrics.py` · 10 tests · l'API ne recalcule plus rien |
 | **ML-8** monitoring par client | ✅ | `ClientMetric` (non cassant), `drift` par client, journalisation `client_*/…` · 8 tests |
 | **ML-4** FedProx | ✅ | 3 tests, dont un test de SENS absent du plan initial · mu=0 identique bit à bit à FedAvg |
 | **ML-3** FedAvg à la main | ✅ | `aggregate.py`, `server.py`, `check_federated.py` · 13 tests · **99,11 % au round 3** en quasi-IID, point d'arrêt franchi |
 
-**73 tests passent.**
+**85 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -641,24 +644,72 @@ baselines:
 
 45 runs + 3 centralisés.
 
-**`experiments/run_grid.py` doit être reprenable** : il interroge la base et
-saute les runs déjà terminés. Sans ça, une déconnexion Colab à la 40ᵉ heure
-fait tout recommencer.
+**Reprise ✅.** Chaque run porte une clé déterministe —
+`grid/fedprox_mu0.01_a0.1_s2_r100`, `grid/centralized_s0_r100` — posée comme
+tag MLflow.
+
+> 🛑 **Le plan et le nombre de rounds font partie de la clé, et ce n'est pas
+> cosmétique.** Sans eux, le run de calibration (`--rounds 10`) marquerait la
+> configuration comme terminée et la grille à 100 rounds la **sauterait** ; le
+> balayage de μ à 40 rounds ferait sauter deux bras entiers. Dans les deux cas,
+> un trou silencieux dans le tableau final. Un test le verrouille. Au démarrage, le script interroge la
+base et saute les runs `FINISHED`. Un run interrompu n'y figure pas : son statut
+est `FAILED` et sa courbe s'arrête au milieu, il doit être refait.
+
+Le centralisé n'a pas d'alpha dans sa clé : il ne dépend pas de la partition, un
+run par seed suffit. Un centralisé par alpha serait cinq fois le même calcul, et
+le tableau du rapport afficherait cinq valeurs identiques comme si elles
+voulaient dire quelque chose.
 
 **Colab** — le notebook ne contient **aucun code scientifique** :
+
+> ⚠️ **Le snippet initial contenait trois erreurs**, chacune fatale au premier
+> run. `MLFLOW_URI` n'est pas la variable lue par le code — c'est
+> `MLFLOW_TRACKING_URI`, le nom standard MLflow — et avec le mauvais nom le
+> puits reste **inerte** : quarante heures de calcul, aucun résultat, aucune
+> erreur. `requirements.txt` n'existe pas à la racine, c'est
+> `requirements/core.txt`. Et le dépôt cloné doit être le vôtre. Version
+> corrigée :
 
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
 
-!git clone https://github.com/justinadjassem/fl-noniid.git
+!git clone https://github.com/<votre-compte>/fl-noniid.git
 %cd fl-noniid
-!pip install -q -r requirements.txt && pip install -e .
+!pip install -q -r requirements/core.txt && pip install -q -e .
 
-import os
-os.environ["MLFLOW_URI"] = "sqlite:////content/drive/MyDrive/fl-results/mlflow.db"
+import os, pathlib
+pathlib.Path('/content/drive/MyDrive/fl-results').mkdir(parents=True, exist_ok=True)
+os.environ["MLFLOW_TRACKING_URI"] = "sqlite:////content/drive/MyDrive/fl-results/mlflow.db"
+
+import torch
+print("GPU :", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "AUCUN")
+```
+
+**Sur Colab, garder l'index pip par défaut** : il installe la build CUDA de
+torch, celle qu'on veut. C'est l'inverse du poste local, où l'on force la build
+CPU. Compter deux minutes d'installation.
+
+Puis, dans cet ordre :
+
+```python
+# 1. Ce qui reste a faire, sans rien executer
+!python experiments/run_grid.py --config experiments/grid.yaml --dry-run
+
+# 2. CALIBRATION — un run court, pour mesurer le cout reel par round sur GPU.
+#    C'est cette mesure qui decide des leviers, pas une estimation.
+!python experiments/run_grid.py --config experiments/grid.yaml --limit 1 --rounds 10
+
+# 3. La grille. Reprenable : relancer la meme commande apres une deconnexion
+#    saute tout ce qui est deja termine.
 !python experiments/run_grid.py --config experiments/grid.yaml
 ```
+
+**Le script refuse de démarrer sans `MLFLOW_TRACKING_URI`.** C'est délibéré :
+`track()` est volontairement inerte sans elle — ce qui permet à pytest et à un
+uvicorn local de tourner sans serveur — mais pour la grille cette même
+propriété serait un piège silencieux.
 
 > ⚠️ Colab déconnecte à ~90 min d'inactivité, 12 h maximum. Écrire dans Drive
 > **à chaque round**, jamais seulement à la fin.

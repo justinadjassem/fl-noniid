@@ -10,12 +10,14 @@ La validation scientifique, elle, ne passe pas par pytest : ce sont les points
 d'arrêt de `scripts/check_federated.py`.
 """
 
+import mlflow
 import numpy as np
 import pytest
 import torch
 from torch.utils.data import TensorDataset
 
 from fl_core.data.loaders import Split
+from fl_core.tracking import EXPERIMENT
 
 
 def jeu_minuscule(n_train: int = 120, n_test: int = 40) -> Split:
@@ -41,3 +43,26 @@ def sans_mnist(monkeypatch):
     import fl_core.server as server_mod
 
     monkeypatch.setattr(server_mod, "load", lambda *a, **k: jeu_minuscule())
+
+
+@pytest.fixture
+def magasin_jetable(tmp_path, monkeypatch):
+    """Isole complètement MLflow dans tmp_path, et restaure l'état global.
+
+    Backend sqlite et non magasin de fichiers : MLflow 3.x refuse `file://`
+    (« maintenance mode »). C'est aussi ce que sert le conteneur, donc le test
+    s'exécute sur le même moteur de stockage que la production.
+
+    L'expérience est créée ici avec un `artifact_location` explicite : sinon
+    MLflow la poserait dans un `./mlruns` relatif au répertoire courant, et la
+    suite de tests salirait le dépôt.
+    """
+    avant = mlflow.get_tracking_uri()
+    uri = f"sqlite:///{tmp_path}/mlflow.db"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
+    mlflow.set_tracking_uri(uri)
+    mlflow.create_experiment(EXPERIMENT, artifact_location=str(tmp_path / "artifacts"))
+    yield tmp_path
+    if mlflow.active_run():
+        mlflow.end_run()
+    mlflow.set_tracking_uri(avant)

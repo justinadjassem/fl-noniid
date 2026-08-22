@@ -47,29 +47,6 @@ def _retrouver(run_id: str):
     return client, found[0]
 
 
-@pytest.fixture
-def magasin_jetable(tmp_path, monkeypatch):
-    """Isole complètement MLflow dans tmp_path, et restaure l'état global.
-
-    Backend sqlite et non magasin de fichiers : MLflow 3.x refuse `file://`
-    (« maintenance mode »). C'est aussi ce que sert le conteneur, donc le test
-    s'exécute sur le même moteur de stockage que la production.
-
-    L'expérience est créée ici avec un `artifact_location` explicite : sinon
-    MLflow la poserait dans un `./mlruns` relatif au répertoire courant, et la
-    suite de tests salirait le dépôt.
-    """
-    avant = mlflow.get_tracking_uri()
-    uri = f"sqlite:///{tmp_path}/mlflow.db"
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
-    mlflow.set_tracking_uri(uri)
-    mlflow.create_experiment(EXPERIMENT, artifact_location=str(tmp_path / "artifacts"))
-    yield tmp_path
-    if mlflow.active_run():
-        mlflow.end_run()
-    mlflow.set_tracking_uri(avant)
-
-
 def test_sans_uri_le_puits_est_inerte(monkeypatch):
     """Sans MLFLOW_TRACKING_URI, tout continue de tourner sans rien journaliser.
 
