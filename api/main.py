@@ -24,6 +24,7 @@ from contracts.schemas import (
     Run,
     RunStatus,
 )
+from fl_core.metrics import final_accuracy, rounds_to_target
 from fl_core.runner import get_runner
 from fl_core.tracking import track
 
@@ -61,14 +62,13 @@ def _execute(run_id: str) -> None:
 
             get_runner().run(run_id, run.config, sink)
 
+            # Ces deux calculs sont de l'ALGORITHME, pas du stockage : ils
+            # vivent dans fl_core/metrics.py et sont partagés avec l'analyse de
+            # la grille. Les recopier ici les ferait diverger, et le rapport
+            # citerait alors deux chiffres calculés différemment.
             accs = [m.global_acc for m in _METRICS[run_id]]
-            tail = accs[-5:] or accs
-            run.final_acc = sum(tail) / len(tail)
-            run.rounds_to_target = next(
-                (m.round for m in _METRICS[run_id]
-                 if m.global_acc >= run.config.target_acc),
-                None,
-            )
+            run.final_acc = final_accuracy(accs)
+            run.rounds_to_target = rounds_to_target(accs, run.config.target_acc)
             run.status = RunStatus.done
             tracker.summarize(run)
     except Exception as exc:                      # noqa: BLE001 — tracer toute panne dans l'UI

@@ -83,6 +83,7 @@ fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
   train.py             train_local() et evaluate() — utilisés par TOUT
   baselines.py         centralisé et local pur
   aggregate.py         moyenne pondérée FedAvg
+  metrics.py           final_accuracy, rounds_to_target, compare_arms
   server.py            la boucle fédérée — FedAvg ET FedProx
   runner.py            protocole Runner + moteur factice + get_runner()
   tracking.py          puits MLflow (écrit par BACK) — inerte sans
@@ -92,7 +93,7 @@ mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
 scripts/               scripts de vérification
-tests/                 63 tests
+tests/                 73 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -201,11 +202,12 @@ Seul fichier dont dépendent les trois couches.
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
 | **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
+| **ML-6** métriques et rigueur | ✅ | `fl_core/metrics.py` · 10 tests · l'API ne recalcule plus rien |
 | **ML-8** monitoring par client | ✅ | `ClientMetric` (non cassant), `drift` par client, journalisation `client_*/…` · 8 tests |
 | **ML-4** FedProx | ✅ | 3 tests, dont un test de SENS absent du plan initial · mu=0 identique bit à bit à FedAvg |
 | **ML-3** FedAvg à la main | ✅ | `aggregate.py`, `server.py`, `check_federated.py` · 13 tests · **99,11 % au round 3** en quasi-IID, point d'arrêt franchi |
 
-**63 tests passent.**
+**73 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -563,8 +565,32 @@ Enfin, basculer `get_runner()` dans `fl_core/runner.py` vers `FlowerRunner`.
 
 ---
 
-### ML-6 · Rigueur expérimentale
+### ML-6 · Rigueur expérimentale ✅
 `ml/metriques-seeds`
+
+> **Fait.** `fl_core/metrics.py`, 10 tests, exécutés en 0,01 s — ce sont des
+> fonctions pures, sans torch ni MLflow.
+>
+> **Deux écarts au plan, assumés.**
+>
+> `rounds_to_target` accepte un paramètre `consecutive`, valant 1 par défaut —
+> comportement du guide inchangé. Aux petits alpha les courbes oscillent de
+> plusieurs points : à `consecutive=1`, un pic chanceux suffit à déclarer la
+> convergence. Sur une courbe test `[0,5 · 0,91 · 0,80 · 0,85 · 0,91 · 0,92 ·
+> 0,93]` et une cible de 0,90, le premier contact tombe au round 2 quand le
+> premier palier tenu sur trois rounds tombe au round 7. L'écart n'est pas
+> anecdotique : il change la conclusion sur la vitesse de convergence.
+>
+> `compare_arms` renvoie aussi `t_stat`, en plus de `mean_diff`, `std_diff` et
+> du critère `significant` du livrable (l'écart moyen dépasse-t-il la
+> variabilité inter-seeds ?). À trois seeds le t reste indicatif — 2 degrés de
+> liberté, seuil à 4,30 pour p < 0,05 — mais il est citable au rapport, là où
+> l'heuristique ne l'est pas.
+>
+> **La zone grise ML/back est fermée.** `api/main.py` ne recalcule plus
+> `final_acc` ni `rounds_to_target` : il appelle `fl_core.metrics`. Deux
+> implémentations auraient divergé, et le rapport aurait cité deux chiffres
+> calculés différemment.
 
 **`fl_core/metrics.py`**
 
