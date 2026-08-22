@@ -92,7 +92,7 @@ mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
 scripts/               scripts de vérification
-tests/                 52 tests
+tests/                 55 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -201,9 +201,10 @@ Seul fichier dont dépendent les trois couches.
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
 | **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
+| **ML-4** FedProx | ✅ | 3 tests, dont un test de SENS absent du plan initial · mu=0 identique bit à bit à FedAvg |
 | **ML-3** FedAvg à la main | ✅ | `aggregate.py`, `server.py`, `check_federated.py` · 13 tests · **99,11 % au round 3** en quasi-IID, point d'arrêt franchi |
 
-**52 tests passent.**
+**55 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -388,8 +389,28 @@ courbes de plus en plus bruitées.
 
 ---
 
-### ML-4 · FedProx
+### ML-4 · FedProx ✅
 `ml/fedprox`
+
+> **Fait**, avec deux corrections au plan ci-dessous — mesurées, pas supposées.
+>
+> **1. Comparer les POIDS, pas l'accuracy.** Les tests proposés plus bas
+> comparent `global_acc`. Mesure faite sur le jeu de test injecté, FedAvg et
+> FedProx affichent 0,1 partout — le modèle est au niveau du hasard — alors que
+> leurs poids diffèrent de 5,3e-4. Le test passait donc **sans rien vérifier**.
+> Même sur le vrai MNIST, l'accuracy reste quantifiée par la taille du jeu de
+> test ; les poids sont le seul observable exact. À mu=0 on exige désormais
+> l'égalité **bit à bit**.
+>
+> **2. Un troisième test, pour le SENS du terme.** Avec `loss - (mu/2)*prox` au
+> lieu de `loss + ...`, le ressort repousse le modèle local au lieu de le
+> retenir. Vérifié par mutation : les deux tests ci-dessous **passent tous les
+> deux** dans ce cas — le résultat change bien, il change juste dans le mauvais
+> sens. Seul un test sur la distance `||w - w^t||` l'attrape.
+>
+> Les deux mutations ont été rejouées pour prouver que les tests ne sont pas
+> complaisants : signe inversé et ancre non transmise sont l'un et l'autre
+> détectés.
 
 **Le code est déjà écrit** — c'est le bloc `if mu > 0.0` de `train_local()`.
 Il suffit de passer `mu > 0` dans la `RunConfig`. FedAvg et FedProx partagent
@@ -438,6 +459,19 @@ done
 
 Attendu : un **μ optimal**, typiquement entre 0,01 et 0,1. Trop petit →
 indiscernable de FedAvg. Trop grand → le modèle local est figé sur le global.
+
+> 🛑 **Mais « trop grand » ne fige pas : ça explose.** Mesuré, distance
+> `||w - w^t||²` après une époque, lr = 0,01 :
+>
+> | μ | 0 | 10 | 100 | 1000 | 10000 |
+> |---|---|---|---|---|---|
+> | distance | 1,0e-2 | 6,4e-3 | 4,8e-4 | **1,5e+2** | **5,0e+8** |
+>
+> Le terme proximal ajoute une courbure μ à l'objectif local. SGD n'est stable
+> que si `lr · μ < 2` — au-delà, l'itération diverge. **Le balayage de μ est
+> donc borné par le pas d'apprentissage**, et un μ divergent ressemble à un bug
+> d'implémentation alors que c'est de l'analyse numérique. La plage
+> 0,001 – 1,0 proposée ci-dessus est sûre à lr = 0,01.
 
 > ⚠️ **Si FedProx ≈ FedAvg partout**, ne concluez pas trop vite : il manque un
 > régime, pas forcément un bug (les deux tests ci-dessus l'auraient attrapé).
@@ -983,6 +1017,8 @@ Chacun a déjà coûté du temps à quelqu'un.
 | 11 | **MLflow 3.x refuse le magasin de fichiers** (`file://`, l'ancien `./mlruns`) et exige un backend SQLAlchemy | `sqlite:///…` partout, y compris dans les tests |
 | 12 | **Port 5000 déjà occupé** (AirPlay, une autre stack de données) : `docker compose up` échoue | `MLFLOW_PORT=5001 docker compose up` |
 | 13 | **MLflow 3.x rejette l'en-tête `Host`** de l'API (`403 Invalid Host header`) : il ne connaît par défaut que localhost et les IP privées, pas le nom de service `mlflow` | `MLFLOW_SERVER_ALLOWED_HOSTS` dans compose — attention, la variable REMPLACE la liste par défaut |
+| 15 | **μ trop grand fait DIVERGER l'entraînement** au lieu de figer le modèle : SGD n'est stable que si `lr · μ < 2` | borner le balayage de μ en fonction de `lr` |
+| 16 | **Comparer l'accuracy pour valider FedProx** : trop grossier, le test passe sans rien vérifier | comparer les poids du modèle global |
 | 14 | **`docker-compose` v1 casse avec Docker ≥ 27** (`KeyError: 'ContainerConfig'`) | installer le plugin v2 : `sudo apt install docker-compose-v2` |
 | 11 | **Stages MLflow dépréciés** depuis 2.9 | utiliser les **alias** (`@champion`) |
 | 12 | **`mlflow models serve` recrée un env conda** au démarrage | `--env-manager local` |
@@ -1032,7 +1068,7 @@ vaut mieux que le maquiller.
 |---|---|---|
 | ML-2 | **~99 % MNIST centralisé** ✅ *(99,33 %)* | le modèle est cassé, ne pas écrire de code fédéré |
 | ML-3 | **98-99 % en quasi-IID** ✅ *(99,11 % dès le round 3)* | l'agrégation est cassée, pas l'hétérogénéité |
-| ML-4 | **μ=0 ≡ FedAvg exactement** | le terme proximal est faux, résultats à jeter |
+| ML-4 | **μ=0 ≡ FedAvg exactement** ✅ *(égalité bit à bit sur les poids)* | le terme proximal est faux, résultats à jeter |
 | ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal | le terme proximal ne contient rien |
 | BACK-8 | **`POST /invocations` répond** | le packaging ou le registry est cassé |
 | BACK-6 | clone + une commande | « s'il faut 2 h de configuration, c'est raté » |

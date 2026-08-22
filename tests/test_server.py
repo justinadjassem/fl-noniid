@@ -10,40 +10,21 @@ Sans cette injection, chaque exécution téléchargerait 404 Mo et la suite
 passerait de quelques secondes à plusieurs minutes.
 """
 
-import numpy as np
 import pytest
 import torch
-from torch.utils.data import TensorDataset
 
 import fl_core.server as server_mod
 from contracts.schemas import Algo, RunConfig
-from fl_core.data.loaders import Split
 from fl_core.server import run_federated
 
 CFG = dict(algo=Algo.fedavg, alpha=100.0, n_clients=4, rounds=2,
            local_epochs=1, batch_size=32, seed=0)
 
 
-def _jeu_minuscule(n_train: int = 120, n_test: int = 40) -> Split:
-    """120 images 1x28x28 et leurs étiquettes, réparties sur les 10 classes.
-
-    Dimensionné au minimum utile : 12 exemples par classe suffisent à faire
-    tourner la partition de Dirichlet sans clients vides, et chaque seconde
-    gagnée ici est payée à chaque exécution de la suite.
-    """
-    g = torch.Generator().manual_seed(0)
-    y_train = torch.arange(n_train) % 10
-    y_test = torch.arange(n_test) % 10
-    return Split(
-        train=TensorDataset(torch.randn(n_train, 1, 28, 28, generator=g), y_train),
-        test=TensorDataset(torch.randn(n_test, 1, 28, 28, generator=g), y_test),
-        labels=y_train.numpy().astype(np.int64),
-    )
-
-
 @pytest.fixture(autouse=True)
-def sans_mnist(monkeypatch):
-    monkeypatch.setattr(server_mod, "load", lambda *a, **k: _jeu_minuscule())
+def _sans_mnist(sans_mnist):
+    """Le jeu minuscule vit dans conftest.py : test_fedprox.py s'en sert aussi,
+    et deux définitions divergeraient."""
 
 
 def _courbe(**surcharges) -> list:
