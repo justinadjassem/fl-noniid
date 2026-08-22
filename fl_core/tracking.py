@@ -59,17 +59,34 @@ class _Mlflow:
         # step=m.round : MLflow est conçu pour des métriques indexées par pas,
         # et le round de communication en est un. C'est ce qui permet de tracer
         # les courbes et de comparer des runs de longueurs différentes.
-        mlflow.log_metrics(
-            {
-                "global_acc": m.global_acc,
-                "global_loss": m.global_loss,
-                "mean_client_acc": m.mean_client_acc,
-                "std_client_acc": m.std_client_acc,
-                "comm_mb": m.comm_mb,
-                "wall_time_s": m.wall_time_s,
-            },
-            step=m.round,
-        )
+        metriques = {
+            "global_acc": m.global_acc,
+            "global_loss": m.global_loss,
+            "mean_client_acc": m.mean_client_acc,
+            "std_client_acc": m.std_client_acc,
+            "comm_mb": m.comm_mb,
+            "wall_time_s": m.wall_time_s,
+        }
+
+        # Le préfixe `client_<id>/` est ce qui permet à MLflow de regrouper et
+        # de superposer les courbes. Sans lui, les dix clients écraseraient la
+        # même clé et il ne resterait que celle du dernier.
+        #
+        # La liste est vide pour les bornes et le moteur factice : c'est la
+        # contrepartie du défaut vide qui rend l'ajout au contrat non cassant.
+        for c in m.clients:
+            metriques.update({
+                f"client_{c.client_id}/drift": c.drift,
+                f"client_{c.client_id}/local_acc": c.local_acc,
+                f"client_{c.client_id}/local_loss": c.local_loss,
+                f"client_{c.client_id}/epochs_run": c.epochs_run,
+                f"client_{c.client_id}/n_samples": c.n_samples,
+                f"client_{c.client_id}/wall_time_s": c.wall_time_s,
+            })
+
+        # Un seul appel par round : dix clients feraient sinon soixante
+        # allers-retours HTTP là où un seul suffit.
+        mlflow.log_metrics(metriques, step=m.round)
 
     def summarize(self, run: Run) -> None:
         """Verse ce que MLflow ne sait pas calculer pour nous."""

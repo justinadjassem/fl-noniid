@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from contracts.schemas import RoundMetric, RunConfig
+from contracts.schemas import ClientMetric, RoundMetric, RunConfig
 from fl_core.aggregate import average_weights
 from fl_core.data.loaders import load
 from fl_core.data.partition import dirichlet_partition
@@ -88,8 +88,10 @@ def run_federated(run_id: str, cfg: RunConfig, on_round, device: str | None = No
         global_params = [p.detach().clone() for p in global_model.parameters()]
 
         states, poids, accs_locales = [], [], []
+        clients: list[ClientMetric] = []
 
         for k in selection:
+            t_client = time.time()
             local = copy.deepcopy(global_model)          # broadcast
 
             # Hétérogénéité systèmes : le straggler rend un travail partiel au
@@ -109,11 +111,29 @@ def run_federated(run_id: str, cfg: RunConfig, on_round, device: str | None = No
             # Sur le jeu de test GLOBAL : seule mesure comparable entre clients,
             # et avec le modèle global. Un client évalué sur ses propres classes
             # afficherait un chiffre flatteur qui ne dit rien.
-            acc_locale, _ = evaluate(local, test_loader, device)
+            acc_locale, loss_locale = evaluate(local, test_loader, device)
+
+            # ||w_k - w^t||_2 : exactement la quantité que le terme proximal
+            # pénalise. La mesurer par client donne la preuve directe que
+            # FedProx CONTIENT la dérive, là où l'accuracy ne montre que son
+            # effet supposé sur le score.
+            drift = float(torch.sqrt(sum(
+                ((p - g) ** 2).sum()
+                for p, g in zip(local.parameters(), global_params)
+            )).detach())
 
             accs_locales.append(acc_locale)
             states.append(local.state_dict())
             poids.append(sizes[k])
+            clients.append(ClientMetric(
+                client_id=int(k),
+                n_samples=sizes[k],
+                epochs_run=epochs_k,
+                local_acc=acc_locale,
+                local_loss=loss_locale,
+                drift=drift,
+                wall_time_s=round(time.time() - t_client, 2),
+            ))
 
         global_model.load_state_dict(average_weights(states, poids))
         acc, loss = evaluate(global_model, test_loader, device)
@@ -130,6 +150,7 @@ def run_federated(run_id: str, cfg: RunConfig, on_round, device: str | None = No
             # Cumulatif : descente + remontée, pour chaque client sélectionné.
             comm_mb=round(2 * n_selected * mb_par_client * r, 2),
             wall_time_s=round(time.time() - t0, 2),
+            clients=clients,
         ))
 
     return global_model

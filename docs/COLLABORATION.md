@@ -92,7 +92,7 @@ mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
 scripts/               scripts de vérification
-tests/                 55 tests
+tests/                 63 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -201,10 +201,11 @@ Seul fichier dont dépendent les trois couches.
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
 | **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
+| **ML-8** monitoring par client | ✅ | `ClientMetric` (non cassant), `drift` par client, journalisation `client_*/…` · 8 tests |
 | **ML-4** FedProx | ✅ | 3 tests, dont un test de SENS absent du plan initial · mu=0 identique bit à bit à FedAvg |
 | **ML-3** FedAvg à la main | ✅ | `aggregate.py`, `server.py`, `check_federated.py` · 13 tests · **99,11 % au round 3** en quasi-IID, point d'arrêt franchi |
 
-**55 tests passent.**
+**63 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -649,8 +650,37 @@ git commit -m "results: final ablation grid"
 
 ---
 
-### ML-8 · Monitoring par client
+### ML-8 · Monitoring par client ✅
 `ml/monitoring-clients` — *dépend de ML-3*
+
+> **Fait.** `ClientMetric` dans le contrat (défaut vide, donc non cassant),
+> `drift` calculé par client dans `server.py`, journalisation `client_<id>/…`
+> dans `tracking.py`. 8 tests.
+>
+> **Le résultat qui compte, et qui change la lecture de tout le projet.** Le
+> terme proximal n'agit qu'APRÈS que le modèle local a bougé : au premier pas
+> `w = w^t`, donc son gradient `mu*(w - w^t)` vaut zéro. Son influence croît
+> donc avec le nombre de pas locaux. Mesuré, réduction du drift à mu = 10 :
+>
+> | pas locaux | 1 | 2 | 3 | 15 | 30 |
+> |---|---|---|---|---|---|
+> | drift mu=0 | 1,06e-1 | 2,23e-1 | 5,39e-1 | 1,06 | 1,41 |
+> | drift mu=10 | 1,03e-1 | 1,96e-1 | 2,94e-1 | 3,43e-1 | 3,82e-1 |
+> | **réduction** | 2,3 % | 12,3 % | 45,5 % | 67,7 % | **73,0 %** |
+>
+> Deux lectures pour le rapport. Le **client drift croît avec les pas locaux**
+> (×13 de 1 à 30) — c'est sa définition même, ici mesurée. Et **à une seule
+> étape locale, FedProx est identique à FedAvg par construction**, pas par
+> accident : si votre configuration donne peu de pas locaux, vous conclurez à
+> tort que le terme proximal ne sert à rien.
+>
+> La grille prévue — 6 000 images par client, batch 64, 2 époques — donne 188
+> pas locaux par round. Largement dans le régime où l'effet existe.
+>
+> ⚠️ Le critère de fin visuel (dix courbes superposées dans l'UI MLflow) est
+> vérifié **programmatiquement** : les clés `client_*/drift` existent avec le
+> bon nombre de pas. La vérification à l'œil, sur dix vrais clients, se fera au
+> premier run Colab.
 
 Jusqu'ici on ne journalise que l'agrégat par round. Il faut descendre au client.
 
@@ -1018,6 +1048,7 @@ Chacun a déjà coûté du temps à quelqu'un.
 | 12 | **Port 5000 déjà occupé** (AirPlay, une autre stack de données) : `docker compose up` échoue | `MLFLOW_PORT=5001 docker compose up` |
 | 13 | **MLflow 3.x rejette l'en-tête `Host`** de l'API (`403 Invalid Host header`) : il ne connaît par défaut que localhost et les IP privées, pas le nom de service `mlflow` | `MLFLOW_SERVER_ALLOWED_HOSTS` dans compose — attention, la variable REMPLACE la liste par défaut |
 | 15 | **μ trop grand fait DIVERGER l'entraînement** au lieu de figer le modèle : SGD n'est stable que si `lr · μ < 2` | borner le balayage de μ en fonction de `lr` |
+| 17 | **Peu de pas locaux → FedProx ≡ FedAvg** par construction (au premier pas `w = w^t`, gradient proximal nul) | vérifier `epochs × batches` avant de conclure que μ ne sert à rien |
 | 16 | **Comparer l'accuracy pour valider FedProx** : trop grossier, le test passe sans rien vérifier | comparer les poids du modèle global |
 | 14 | **`docker-compose` v1 casse avec Docker ≥ 27** (`KeyError: 'ContainerConfig'`) | installer le plugin v2 : `sudo apt install docker-compose-v2` |
 | 11 | **Stages MLflow dépréciés** depuis 2.9 | utiliser les **alias** (`@champion`) |
@@ -1069,7 +1100,7 @@ vaut mieux que le maquiller.
 | ML-2 | **~99 % MNIST centralisé** ✅ *(99,33 %)* | le modèle est cassé, ne pas écrire de code fédéré |
 | ML-3 | **98-99 % en quasi-IID** ✅ *(99,11 % dès le round 3)* | l'agrégation est cassée, pas l'hétérogénéité |
 | ML-4 | **μ=0 ≡ FedAvg exactement** ✅ *(égalité bit à bit sur les poids)* | le terme proximal est faux, résultats à jeter |
-| ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal | le terme proximal ne contient rien |
+| ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal ✅ *(−45 % à 3 pas locaux)* | le terme proximal ne contient rien |
 | BACK-8 | **`POST /invocations` répond** | le packaging ou le registry est cassé |
 | BACK-6 | clone + une commande | « s'il faut 2 h de configuration, c'est raté » |
 

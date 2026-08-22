@@ -14,7 +14,8 @@ from fastapi.testclient import TestClient
 
 from api.main import app
 
-from contracts.schemas import Algo, RoundMetric, Run, RunConfig, RunStatus
+from contracts.schemas import (Algo, ClientMetric, RoundMetric, Run, RunConfig,
+                               RunStatus)
 from fl_core.tracking import EXPERIMENT, track
 
 CFG = RunConfig(algo=Algo.fedprox, mu=0.01, alpha=0.1, rounds=3, seed=0)
@@ -206,3 +207,49 @@ def test_un_run_qui_plante_est_marque_en_echec_dans_mlflow(magasin_jetable, monk
     _, run = _retrouver(run_id)
 
     assert run.info.status == "FAILED"
+
+
+def _client(cid: int, drift: float) -> ClientMetric:
+    return ClientMetric(client_id=cid, n_samples=100 * (cid + 1), epochs_run=2,
+                        local_acc=0.7 + 0.05 * cid, local_loss=0.9,
+                        drift=drift, wall_time_s=1.5)
+
+
+def test_les_metriques_par_client_sont_journalisees(magasin_jetable):
+    """Critère de fin de ML-8 : dans l'UI MLflow, sélectionner un run et voir
+    une courbe `client_*/drift` par client.
+
+    Le préfixe `client_<id>/` est ce qui permet à MLflow de les regrouper et de
+    les superposer. Sans lui, dix clients écraseraient la même clé et il ne
+    resterait qu'une courbe — celle du dernier.
+    """
+    with track("run-clients", CFG) as tr:
+        for r in (1, 2):
+            m = _metric("run-clients", r)
+            m.clients = [_client(0, 0.5 * r), _client(1, 0.9 * r)]
+            tr.on_round(m)
+
+    client, run = _retrouver("run-clients")
+
+    for cid in (0, 1):
+        historique = client.get_metric_history(run.info.run_id, f"client_{cid}/drift")
+        assert [h.step for h in historique] == [1, 2], f"client {cid} mal journalisé"
+
+    assert client.get_metric_history(run.info.run_id, "client_0/drift")[1].value == pytest.approx(1.0)
+    assert client.get_metric_history(run.info.run_id, "client_1/drift")[1].value == pytest.approx(1.8)
+
+    for champ in ("local_acc", "local_loss", "epochs_run", "n_samples", "wall_time_s"):
+        assert client.get_metric_history(run.info.run_id, f"client_0/{champ}"), \
+            f"client_0/{champ} jamais journalisé"
+
+
+def test_un_round_sans_clients_ne_journalise_rien_de_plus(magasin_jetable):
+    """Les bornes et le moteur factice émettent des RoundMetric sans clients.
+    Le puits doit les accepter tels quels — c'est la contrepartie du défaut
+    vide qui rend l'ajout au contrat non cassant."""
+    with track("run-sans-clients", CFG) as tr:
+        tr.on_round(_metric("run-sans-clients", 1))
+
+    _, run = _retrouver("run-sans-clients")
+
+    assert not [k for k in run.data.metrics if k.startswith("client_")]
