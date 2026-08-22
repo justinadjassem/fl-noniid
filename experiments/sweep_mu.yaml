@@ -1,0 +1,39 @@
+name: sweep_mu
+
+# Balayage de mu, A LANCER AVANT la grille finale.
+#
+# Un mu mal choisi biaise toute la comparaison : trop petit il est
+# indiscernable de FedAvg, trop grand il fige le modele local sur le global.
+# Le mu retenu ici remplacera celui de grid.yaml.
+#
+# Un seul alpha, choisi en forte heterogeneite : c'est la que le terme
+# proximal est cense servir. FedAvg sert de reference sur la meme ligne.
+#
+# 5 bras x 1 alpha x 3 seeds = 15 runs, a 40 rounds : environ le tiers du
+# cout d'un run de la grille finale.
+#
+# ATTENTION : mu est borne par le pas d'apprentissage. Le terme proximal
+# ajoute une courbure mu a l'objectif local, et SGD ne converge que si
+# lr * mu < 2. A lr = 0,01, tout mu au-dela de ~200 fait DIVERGER
+# l'entrainement au lieu de figer le modele (mesure : mu=1000 -> 1,5e+2,
+# mu=10000 -> 5,0e+8). La plage ci-dessous est sure.
+
+dataset: mnist
+n_clients: 10
+rounds: 40
+local_epochs: 2
+lr: 0.01
+batch_size: 64
+target_acc: 0.90
+
+seeds: [0, 1, 2]
+alphas: [0.1]
+
+arms:
+  - {algo: fedavg,  mu: 0.0}      # la reference
+  - {algo: fedprox, mu: 0.001}
+  - {algo: fedprox, mu: 0.01}
+  - {algo: fedprox, mu: 0.1}
+  - {algo: fedprox, mu: 1.0}
+
+baselines: []

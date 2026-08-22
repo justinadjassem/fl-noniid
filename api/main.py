@@ -1,9 +1,12 @@
 """API du système : orchestration des expériences.
 
-ÉTAT SOCLE — le stockage est en mémoire.
-MLflow le remplacera
-le but est de prouver que la chaîne contrat → moteur → API → dashboard
-fonctionne de bout en bout.
+ÉTAT INTERMÉDIAIRE — le stockage de LECTURE est encore en mémoire, mais
+chaque run est déjà versé dans MLflow en ÉCRITURE. BACK-2 basculera la
+lecture sur `search_runs()` et supprimera les dictionnaires : deux sources
+de vérité durables divergeraient.
+
+Le but reste le même : prouver que la chaîne contrat → moteur → API →
+dashboard fonctionne de bout en bout.
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ from contracts.schemas import (
     Run,
     RunStatus,
 )
+from fl_core.metrics import final_accuracy, rounds_to_target
 from fl_core.runner import get_runner
+from fl_core.tracking import track
 
 app = FastAPI(
     title="FL non-IID — FedAvg vs FedProx",
@@ -34,26 +39,38 @@ _METRICS: dict[str, list[RoundMetric]] = defaultdict(list)
 
 
 def _execute(run_id: str) -> None:
-    """Exécute une expérience en tâche de fond."""
+    """Exécute une expérience en tâche de fond.
+
+    La mémoire reste la source de vérité en LECTURE ; MLflow reçoit les mêmes
+    métriques en ÉCRITURE. Ce double versement est temporaire : BACK-2 bascule
+    la lecture sur MLflow et le dictionnaire disparaît. Deux sources de vérité
+    durables divergeraient.
+    """
     run = _RUNS[run_id]
     run.status = RunStatus.running
 
-    def sink(m: RoundMetric) -> None:
-        _METRICS[run_id].append(m)
-        run.current_round = m.round
-
+    # L'ordre compte : le `try` enveloppe le `with`, jamais l'inverse. Une
+    # panne du moteur doit d'abord traverser le contexte MLflow — qui clôt
+    # alors le run en FAILED — avant d'être attrapée pour affichage dans l'UI.
     try:
-        get_runner().run(run_id, run.config, sink)
+        with track(run_id, run.config) as tracker:
 
-        accs = [m.global_acc for m in _METRICS[run_id]]
-        tail = accs[-5:] or accs
-        run.final_acc = sum(tail) / len(tail)
-        run.rounds_to_target = next(
-            (m.round for m in _METRICS[run_id]
-             if m.global_acc >= run.config.target_acc),
-            None,
-        )
-        run.status = RunStatus.done
+            def sink(m: RoundMetric) -> None:
+                _METRICS[run_id].append(m)
+                run.current_round = m.round
+                tracker.on_round(m)
+
+            get_runner().run(run_id, run.config, sink)
+
+            # Ces deux calculs sont de l'ALGORITHME, pas du stockage : ils
+            # vivent dans fl_core/metrics.py et sont partagés avec l'analyse de
+            # la grille. Les recopier ici les ferait diverger, et le rapport
+            # citerait alors deux chiffres calculés différemment.
+            accs = [m.global_acc for m in _METRICS[run_id]]
+            run.final_acc = final_accuracy(accs)
+            run.rounds_to_target = rounds_to_target(accs, run.config.target_acc)
+            run.status = RunStatus.done
+            tracker.summarize(run)
     except Exception as exc:                      # noqa: BLE001 — tracer toute panne dans l'UI
         run.status = RunStatus.failed
         run.error = f"{type(exc).__name__}: {exc}"

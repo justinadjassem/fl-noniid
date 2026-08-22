@@ -1,0 +1,31 @@
+name: grid
+
+# Le plan expérimental. Ce fichier EST le protocole cité au rapport :
+# le modifier après coup invaliderait les résultats déjà produits.
+#
+# 3 bras x 5 alphas x 3 seeds = 45 runs, plus 1 centralisé par seed = 48.
+#
+# Les seeds sont APPARIÉS : le même seed donne la même partition et la même
+# initialisation à tous les bras. On compare donc des écarts par paire, ce qui
+# élimine la plus grosse source de bruit du protocole.
+
+dataset: mnist
+n_clients: 10
+rounds: 100
+local_epochs: 2
+lr: 0.01
+batch_size: 64
+target_acc: 0.90
+
+seeds: [0, 1, 2]
+alphas: [0.05, 0.1, 0.5, 1.0, 100.0]
+
+arms:
+  - {algo: fedavg,  mu: 0.0}
+  - {algo: fedprox, mu: 0.01}   # mu à confirmer par le balayage préalable
+  - {algo: local,   mu: 0.0}
+
+# Le centralisé ne dépend pas d'alpha : toutes les données sont réunies, la
+# partition n'intervient jamais. Un run par seed suffit.
+baselines:
+  - {algo: centralized, mu: 0.0}

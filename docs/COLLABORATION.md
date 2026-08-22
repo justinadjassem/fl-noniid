@@ -82,12 +82,20 @@ fl_core/               Cœur scientifique. Ne connaît ni FastAPI ni Streamlit.
   seeding.py           déterminisme
   train.py             train_local() et evaluate() — utilisés par TOUT
   baselines.py         centralisé et local pur
+  aggregate.py         moyenne pondérée FedAvg
+  metrics.py           final_accuracy, rounds_to_target, compare_arms
+  grid.py              plan expérimental : énumération, clés, reprise
+  server.py            la boucle fédérée — FedAvg ET FedProx
   runner.py            protocole Runner + moteur factice + get_runner()
+  tracking.py          puits MLflow (écrit par BACK) — inerte sans
+                       MLFLOW_TRACKING_URI
 
+mlflow/Dockerfile      serveur de suivi, backend sqlite, UI sur :5000
 api/main.py            FastAPI : /health, /runs, /runs/{id}/metrics
 app/dashboard.py       Streamlit : convergence, tableau croisé, client drift
+experiments/           grid.yaml (le protocole) + run_grid.py (la CLI)
 scripts/               scripts de vérification
-tests/                 31 tests
+tests/                 85 tests
 ```
 
 ### La couture à comprendre avant tout
@@ -195,8 +203,14 @@ Seul fichier dont dépendent les trois couches.
 | Dépendances en couches | ✅ | `requirements/` + `pyproject.toml` |
 | **ML-1** partition Dirichlet | ✅ | 9 tests, heatmap, manifestes JSON |
 | **ML-2** modèle et bornes | ✅ | CNN, `seeding`, `train`, bornes · 6 tests · **99,33 % en centralisé**, point d'arrêt franchi |
+| **BACK-1** service MLflow | ✅ | `mlflow/Dockerfile`, puits `fl_core/tracking.py` · 8 tests |
+| **ML-7** outillage de la grille | ✅ | `fl_core/grid.py`, `experiments/grid.yaml`, `run_grid.py` reprenable · 12 tests · **grille non lancée** |
+| **ML-6** métriques et rigueur | ✅ | `fl_core/metrics.py` · 10 tests · l'API ne recalcule plus rien |
+| **ML-8** monitoring par client | ✅ | `ClientMetric` (non cassant), `drift` par client, journalisation `client_*/…` · 8 tests |
+| **ML-4** FedProx | ✅ | 3 tests, dont un test de SENS absent du plan initial · mu=0 identique bit à bit à FedAvg |
+| **ML-3** FedAvg à la main | ✅ | `aggregate.py`, `server.py`, `check_federated.py` · 13 tests · **99,11 % au round 3** en quasi-IID, point d'arrêt franchi |
 
-**31 tests passent.**
+**85 tests passent.**
 
 ### Résultats déjà mesurés
 
@@ -253,12 +267,42 @@ Deux ou trois de ces leviers suffisent à repasser sous la nuit. **La décision
 se prend sur `wall_time_s` mesuré, pas sur une estimation** — c'est pour ça que
 le champ est dans le contrat depuis le premier jour.
 
+#### La mesure est tombée (ML-3, 20 août 2026)
+
+**755 s par round**, FedAvg, 2 clients, 2 époques locales, MNIST complet,
+CPU 16 cœurs, machine sous charge 20/16. L'estimation de 590 s était optimiste
+d'environ 28 %.
+
+À 10 clients le travail d'entraînement est **identique** — les mêmes 120 000
+images, réparties autrement — mais s'y ajoutent huit évaluations locales de
+plus par round. Compter **800 à 900 s par round**.
+
+```
+45 runs × 100 rounds × 800 s ≈ 39 jours de CPU
+```
+
+**Décision prise : la grille tournera sur Colab GPU.** `run_federated` résout
+désormais le device automatiquement (`cuda` si disponible), sans quoi le
+passage sur Colab n'apporterait rien — tout y tournerait sur le CPU de la
+machine virtuelle.
+
+Un levier absent du tableau ci-dessus, et le moins cher scientifiquement :
+**n'évaluer les modèles locaux que tous les k rounds**. `std_client_acc` n'a
+pas besoin d'une granularité par round, et cette évaluation représente une
+part importante du coût dès que les clients sont nombreux.
+
 ---
 
 ## 6. Les tâches restantes
 
-### ML-3 · FedAvg à la main
+### ML-3 · FedAvg à la main ✅
 `ml/fedavg-manuel`
+
+> **Fait.** `fl_core/aggregate.py`, `fl_core/server.py`, `scripts/check_federated.py`, 13 tests. Point d'arrêt franchi : **99,11 %
+> au round 3** en quasi-IID (2 clients, α=100), contre 98-99 % attendus en
+> 20-30 rounds. `run_federated` accepte un `device` et résout `cuda`
+> automatiquement. FedProx n'exigera aucune ligne de serveur : `cfg.mu` est
+> déjà transmis à `train_local`, il ne reste que les deux tests de ML-4.
 
 **Pourquoi à la main avant Flower :** vous obtenez une implémentation de
 référence. Au portage sur Flower, vous comparez les chiffres. Sans elle, un
@@ -351,8 +395,28 @@ courbes de plus en plus bruitées.
 
 ---
 
-### ML-4 · FedProx
+### ML-4 · FedProx ✅
 `ml/fedprox`
+
+> **Fait**, avec deux corrections au plan ci-dessous — mesurées, pas supposées.
+>
+> **1. Comparer les POIDS, pas l'accuracy.** Les tests proposés plus bas
+> comparent `global_acc`. Mesure faite sur le jeu de test injecté, FedAvg et
+> FedProx affichent 0,1 partout — le modèle est au niveau du hasard — alors que
+> leurs poids diffèrent de 5,3e-4. Le test passait donc **sans rien vérifier**.
+> Même sur le vrai MNIST, l'accuracy reste quantifiée par la taille du jeu de
+> test ; les poids sont le seul observable exact. À mu=0 on exige désormais
+> l'égalité **bit à bit**.
+>
+> **2. Un troisième test, pour le SENS du terme.** Avec `loss - (mu/2)*prox` au
+> lieu de `loss + ...`, le ressort repousse le modèle local au lieu de le
+> retenir. Vérifié par mutation : les deux tests ci-dessous **passent tous les
+> deux** dans ce cas — le résultat change bien, il change juste dans le mauvais
+> sens. Seul un test sur la distance `||w - w^t||` l'attrape.
+>
+> Les deux mutations ont été rejouées pour prouver que les tests ne sont pas
+> complaisants : signe inversé et ancre non transmise sont l'un et l'autre
+> détectés.
 
 **Le code est déjà écrit** — c'est le bloc `if mu > 0.0` de `train_local()`.
 Il suffit de passer `mu > 0` dans la `RunConfig`. FedAvg et FedProx partagent
@@ -401,6 +465,19 @@ done
 
 Attendu : un **μ optimal**, typiquement entre 0,01 et 0,1. Trop petit →
 indiscernable de FedAvg. Trop grand → le modèle local est figé sur le global.
+
+> 🛑 **Mais « trop grand » ne fige pas : ça explose.** Mesuré, distance
+> `||w - w^t||²` après une époque, lr = 0,01 :
+>
+> | μ | 0 | 10 | 100 | 1000 | 10000 |
+> |---|---|---|---|---|---|
+> | distance | 1,0e-2 | 6,4e-3 | 4,8e-4 | **1,5e+2** | **5,0e+8** |
+>
+> Le terme proximal ajoute une courbure μ à l'objectif local. SGD n'est stable
+> que si `lr · μ < 2` — au-delà, l'itération diverge. **Le balayage de μ est
+> donc borné par le pas d'apprentissage**, et un μ divergent ressemble à un bug
+> d'implémentation alors que c'est de l'analyse numérique. La plage
+> 0,001 – 1,0 proposée ci-dessus est sûre à lr = 0,01.
 
 > ⚠️ **Si FedProx ≈ FedAvg partout**, ne concluez pas trop vite : il manque un
 > régime, pas forcément un bug (les deux tests ci-dessus l'auraient attrapé).
@@ -491,8 +568,32 @@ Enfin, basculer `get_runner()` dans `fl_core/runner.py` vers `FlowerRunner`.
 
 ---
 
-### ML-6 · Rigueur expérimentale
+### ML-6 · Rigueur expérimentale ✅
 `ml/metriques-seeds`
+
+> **Fait.** `fl_core/metrics.py`, 10 tests, exécutés en 0,01 s — ce sont des
+> fonctions pures, sans torch ni MLflow.
+>
+> **Deux écarts au plan, assumés.**
+>
+> `rounds_to_target` accepte un paramètre `consecutive`, valant 1 par défaut —
+> comportement du guide inchangé. Aux petits alpha les courbes oscillent de
+> plusieurs points : à `consecutive=1`, un pic chanceux suffit à déclarer la
+> convergence. Sur une courbe test `[0,5 · 0,91 · 0,80 · 0,85 · 0,91 · 0,92 ·
+> 0,93]` et une cible de 0,90, le premier contact tombe au round 2 quand le
+> premier palier tenu sur trois rounds tombe au round 7. L'écart n'est pas
+> anecdotique : il change la conclusion sur la vitesse de convergence.
+>
+> `compare_arms` renvoie aussi `t_stat`, en plus de `mean_diff`, `std_diff` et
+> du critère `significant` du livrable (l'écart moyen dépasse-t-il la
+> variabilité inter-seeds ?). À trois seeds le t reste indicatif — 2 degrés de
+> liberté, seuil à 4,30 pour p < 0,05 — mais il est citable au rapport, là où
+> l'heuristique ne l'est pas.
+>
+> **La zone grise ML/back est fermée.** `api/main.py` ne recalcule plus
+> `final_acc` ni `rounds_to_target` : il appelle `fl_core.metrics`. Deux
+> implémentations auraient divergé, et le rapport aurait cité deux chiffres
+> calculés différemment.
 
 **`fl_core/metrics.py`**
 
@@ -543,24 +644,72 @@ baselines:
 
 45 runs + 3 centralisés.
 
-**`experiments/run_grid.py` doit être reprenable** : il interroge la base et
-saute les runs déjà terminés. Sans ça, une déconnexion Colab à la 40ᵉ heure
-fait tout recommencer.
+**Reprise ✅.** Chaque run porte une clé déterministe —
+`grid/fedprox_mu0.01_a0.1_s2_r100`, `grid/centralized_s0_r100` — posée comme
+tag MLflow.
+
+> 🛑 **Le plan et le nombre de rounds font partie de la clé, et ce n'est pas
+> cosmétique.** Sans eux, le run de calibration (`--rounds 10`) marquerait la
+> configuration comme terminée et la grille à 100 rounds la **sauterait** ; le
+> balayage de μ à 40 rounds ferait sauter deux bras entiers. Dans les deux cas,
+> un trou silencieux dans le tableau final. Un test le verrouille. Au démarrage, le script interroge la
+base et saute les runs `FINISHED`. Un run interrompu n'y figure pas : son statut
+est `FAILED` et sa courbe s'arrête au milieu, il doit être refait.
+
+Le centralisé n'a pas d'alpha dans sa clé : il ne dépend pas de la partition, un
+run par seed suffit. Un centralisé par alpha serait cinq fois le même calcul, et
+le tableau du rapport afficherait cinq valeurs identiques comme si elles
+voulaient dire quelque chose.
 
 **Colab** — le notebook ne contient **aucun code scientifique** :
+
+> ⚠️ **Le snippet initial contenait trois erreurs**, chacune fatale au premier
+> run. `MLFLOW_URI` n'est pas la variable lue par le code — c'est
+> `MLFLOW_TRACKING_URI`, le nom standard MLflow — et avec le mauvais nom le
+> puits reste **inerte** : quarante heures de calcul, aucun résultat, aucune
+> erreur. `requirements.txt` n'existe pas à la racine, c'est
+> `requirements/core.txt`. Et le dépôt cloné doit être le vôtre. Version
+> corrigée :
 
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
 
-!git clone https://github.com/justinadjassem/fl-noniid.git
+!git clone https://github.com/<votre-compte>/fl-noniid.git
 %cd fl-noniid
-!pip install -q -r requirements.txt && pip install -e .
+!pip install -q -r requirements/core.txt && pip install -q -e .
 
-import os
-os.environ["MLFLOW_URI"] = "sqlite:////content/drive/MyDrive/fl-results/mlflow.db"
+import os, pathlib
+pathlib.Path('/content/drive/MyDrive/fl-results').mkdir(parents=True, exist_ok=True)
+os.environ["MLFLOW_TRACKING_URI"] = "sqlite:////content/drive/MyDrive/fl-results/mlflow.db"
+
+import torch
+print("GPU :", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "AUCUN")
+```
+
+**Sur Colab, garder l'index pip par défaut** : il installe la build CUDA de
+torch, celle qu'on veut. C'est l'inverse du poste local, où l'on force la build
+CPU. Compter deux minutes d'installation.
+
+Puis, dans cet ordre :
+
+```python
+# 1. Ce qui reste a faire, sans rien executer
+!python experiments/run_grid.py --config experiments/grid.yaml --dry-run
+
+# 2. CALIBRATION — un run court, pour mesurer le cout reel par round sur GPU.
+#    C'est cette mesure qui decide des leviers, pas une estimation.
+!python experiments/run_grid.py --config experiments/grid.yaml --limit 1 --rounds 10
+
+# 3. La grille. Reprenable : relancer la meme commande apres une deconnexion
+#    saute tout ce qui est deja termine.
 !python experiments/run_grid.py --config experiments/grid.yaml
 ```
+
+**Le script refuse de démarrer sans `MLFLOW_TRACKING_URI`.** C'est délibéré :
+`track()` est volontairement inerte sans elle — ce qui permet à pytest et à un
+uvicorn local de tourner sans serveur — mais pour la grille cette même
+propriété serait un piège silencieux.
 
 > ⚠️ Colab déconnecte à ~90 min d'inactivité, 12 h maximum. Écrire dans Drive
 > **à chaque round**, jamais seulement à la fin.
@@ -578,8 +727,37 @@ git commit -m "results: final ablation grid"
 
 ---
 
-### ML-8 · Monitoring par client
+### ML-8 · Monitoring par client ✅
 `ml/monitoring-clients` — *dépend de ML-3*
+
+> **Fait.** `ClientMetric` dans le contrat (défaut vide, donc non cassant),
+> `drift` calculé par client dans `server.py`, journalisation `client_<id>/…`
+> dans `tracking.py`. 8 tests.
+>
+> **Le résultat qui compte, et qui change la lecture de tout le projet.** Le
+> terme proximal n'agit qu'APRÈS que le modèle local a bougé : au premier pas
+> `w = w^t`, donc son gradient `mu*(w - w^t)` vaut zéro. Son influence croît
+> donc avec le nombre de pas locaux. Mesuré, réduction du drift à mu = 10 :
+>
+> | pas locaux | 1 | 2 | 3 | 15 | 30 |
+> |---|---|---|---|---|---|
+> | drift mu=0 | 1,06e-1 | 2,23e-1 | 5,39e-1 | 1,06 | 1,41 |
+> | drift mu=10 | 1,03e-1 | 1,96e-1 | 2,94e-1 | 3,43e-1 | 3,82e-1 |
+> | **réduction** | 2,3 % | 12,3 % | 45,5 % | 67,7 % | **73,0 %** |
+>
+> Deux lectures pour le rapport. Le **client drift croît avec les pas locaux**
+> (×13 de 1 à 30) — c'est sa définition même, ici mesurée. Et **à une seule
+> étape locale, FedProx est identique à FedAvg par construction**, pas par
+> accident : si votre configuration donne peu de pas locaux, vous conclurez à
+> tort que le terme proximal ne sert à rien.
+>
+> La grille prévue — 6 000 images par client, batch 64, 2 époques — donne 188
+> pas locaux par round. Largement dans le régime où l'effet existe.
+>
+> ⚠️ Le critère de fin visuel (dix courbes superposées dans l'UI MLflow) est
+> vérifié **programmatiquement** : les clés `client_*/drift` existent avec le
+> bon nombre de pas. La vérification à l'œil, sur dix vrais clients, se fera au
+> premier run Colab.
 
 Jusqu'ici on ne journalise que l'agrégat par round. Il faut descendre au client.
 
@@ -732,7 +910,7 @@ l'argument de l'asynchrone : plus de mises à jour par unité de temps.
 
 | # | Branche | Contenu | Critère de fin |
 |---|---|---|---|
-| 1 | `api/service-mlflow` | `mlflow/Dockerfile`, service compose, `fl_core/tracking.py` | 3 services démarrent, UI MLflow sur `:5000` |
+| 1 ✅ | `api/service-mlflow` | `mlflow/Dockerfile`, service compose, `fl_core/tracking.py` | 3 services démarrent, UI MLflow sur `:5000` |
 | 2 | `api/store-vers-mlflow` | remplacer le stockage mémoire par `search_runs()` | le dashboard marche **sans une ligne modifiée** |
 | 3 | `api/routes-ingestion` | `POST /runs/external`, `/metrics`, `/complete` + jeton | un script extérieur peut verser des métriques |
 | 4 | `api/streaming-sse` | flux SSE, worker séparé | la courbe se dessine round par round |
@@ -943,6 +1121,13 @@ Chacun a déjà coûté du temps à quelqu'un.
 | 8 | **`ModuleNotFoundError: contracts`** | `pip install -e .` |
 | 9 | **Port 8501 occupé** | un `streamlit run` local tourne encore |
 | 10 | **PowerShell écrit en UTF-16** | jamais de `>` pour créer un fichier texte |
+| 11 | **MLflow 3.x refuse le magasin de fichiers** (`file://`, l'ancien `./mlruns`) et exige un backend SQLAlchemy | `sqlite:///…` partout, y compris dans les tests |
+| 12 | **Port 5000 déjà occupé** (AirPlay, une autre stack de données) : `docker compose up` échoue | `MLFLOW_PORT=5001 docker compose up` |
+| 13 | **MLflow 3.x rejette l'en-tête `Host`** de l'API (`403 Invalid Host header`) : il ne connaît par défaut que localhost et les IP privées, pas le nom de service `mlflow` | `MLFLOW_SERVER_ALLOWED_HOSTS` dans compose — attention, la variable REMPLACE la liste par défaut |
+| 15 | **μ trop grand fait DIVERGER l'entraînement** au lieu de figer le modèle : SGD n'est stable que si `lr · μ < 2` | borner le balayage de μ en fonction de `lr` |
+| 17 | **Peu de pas locaux → FedProx ≡ FedAvg** par construction (au premier pas `w = w^t`, gradient proximal nul) | vérifier `epochs × batches` avant de conclure que μ ne sert à rien |
+| 16 | **Comparer l'accuracy pour valider FedProx** : trop grossier, le test passe sans rien vérifier | comparer les poids du modèle global |
+| 14 | **`docker-compose` v1 casse avec Docker ≥ 27** (`KeyError: 'ContainerConfig'`) | installer le plugin v2 : `sudo apt install docker-compose-v2` |
 | 11 | **Stages MLflow dépréciés** depuis 2.9 | utiliser les **alias** (`@champion`) |
 | 12 | **`mlflow models serve` recrée un env conda** au démarrage | `--env-manager local` |
 | 13 | **Journaliser depuis les clients Ray** : écritures concurrentes | renvoyer les métriques depuis `fit()`, journaliser côté serveur |
@@ -990,9 +1175,9 @@ vaut mieux que le maquiller.
 | Étape | Le test | Si ça échoue |
 |---|---|---|
 | ML-2 | **~99 % MNIST centralisé** ✅ *(99,33 %)* | le modèle est cassé, ne pas écrire de code fédéré |
-| ML-3 | **98-99 % en quasi-IID** | l'agrégation est cassée, pas l'hétérogénéité |
-| ML-4 | **μ=0 ≡ FedAvg exactement** | le terme proximal est faux, résultats à jeter |
-| ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal | le terme proximal ne contient rien |
+| ML-3 | **98-99 % en quasi-IID** ✅ *(99,11 % dès le round 3)* | l'agrégation est cassée, pas l'hétérogénéité |
+| ML-4 | **μ=0 ≡ FedAvg exactement** ✅ *(égalité bit à bit sur les poids)* | le terme proximal est faux, résultats à jeter |
+| ML-8 | **`drift` plus faible à μ>0 qu'à μ=0**, à α égal ✅ *(−45 % à 3 pas locaux)* | le terme proximal ne contient rien |
 | BACK-8 | **`POST /invocations` répond** | le packaging ou le registry est cassé |
 | BACK-6 | clone + une commande | « s'il faut 2 h de configuration, c'est raté » |
 

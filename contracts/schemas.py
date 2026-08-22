@@ -77,6 +77,24 @@ class RunConfig(BaseModel):
         return f"Local pur (alpha={self.alpha:g}, borne basse)"
 
 
+class ClientMetric(BaseModel):
+    """Une ligne par client et par round. C'est le grain fin du monitoring.
+
+    `drift` est la métrique centrale : c'est EXACTEMENT la quantité que le
+    terme proximal de FedProx pénalise, ||w_k - w_global||_2. La journaliser
+    par client donne la preuve directe que FedProx contient la dérive, et pas
+    seulement qu'il améliore le score — un test plus fin que l'accuracy.
+    """
+
+    client_id: int = Field(ge=0)
+    n_samples: int = Field(ge=0, description="Taille du shard : le déséquilibre de quantité")
+    epochs_run: int = Field(ge=0, description="< local_epochs si hétérogénéité systèmes")
+    local_acc: float = Field(description="Sur le jeu de test GLOBAL, donc comparable")
+    local_loss: float
+    drift: float = Field(ge=0, description="||w_k - w_global||_2 en fin d'entraînement local")
+    wall_time_s: float = Field(0.0, ge=0, description="Qui ralentit le round")
+
+
 class RoundMetric(BaseModel):
     """Une ligne par round de communication. C'est l'unité de streaming."""
 
@@ -92,6 +110,11 @@ class RoundMetric(BaseModel):
 
     comm_mb: float = Field(0.0, description="Volume cumulé d'échange sur ce round")
     wall_time_s: float = 0.0
+
+    # Défaut vide : l'ajout est NON CASSANT. Le moteur factice, les bornes et
+    # le dashboard continuent de fonctionner sans une ligne modifiée. C'est la
+    # forme à privilégier pour toute évolution du contrat.
+    clients: list[ClientMetric] = []
 
 
 class Run(BaseModel):
